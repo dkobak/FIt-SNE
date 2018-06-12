@@ -12,7 +12,7 @@ import numpy as np
 #	fast_tsne(X, perplexity = 30)
 
 def fast_tsne(X, theta=.5, perplexity=30, map_dims=2, max_iter=1000, 
-              stop_lying_iter=200, K=-1, sigma=-30, nbody_algo='FFT', knn_algo='annoy',
+              stop_lying_iter=200, K=-1, K_random=0, sigma=-30, nbody_algo='FFT', knn_algo='annoy',
               early_exag_coeff=12, no_momentum_during_exag=0, n_trees=50, 
               search_k=None, start_late_exag_iter=-1, late_exag_coeff=-1,
               nterms=3, intervals_per_integer=1, min_num_intervals=50,            
@@ -20,9 +20,12 @@ def fast_tsne(X, theta=.5, perplexity=30, map_dims=2, max_iter=1000,
     
     if search_k is None:
         if perplexity > 0:
-            search_k = 3 * perplexity * n_trees
+            if K > 0:
+               search_k = K * n_trees
+            else:
+               search_k = 3 * perplexity * n_trees
         else:
-            search_k = 3 * K * n_trees
+            search_k = K * n_trees
         
     if nbody_algo == 'Barnes-Hut':
         nbody_algo = 1
@@ -49,6 +52,7 @@ def fast_tsne(X, theta=.5, perplexity=30, map_dims=2, max_iter=1000,
         f.write(struct.pack('=i', max_iter))
         f.write(struct.pack('=i', stop_lying_iter))
         f.write(struct.pack('=i', K))
+        f.write(struct.pack('=i', K_random))
         f.write(struct.pack('=d', sigma))
         f.write(struct.pack('=i', nbody_algo))
         f.write(struct.pack('=i', knn_algo))

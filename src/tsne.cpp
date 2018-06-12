@@ -88,7 +88,7 @@ void print_progress ( int iter, double * Y, int N, int no_dims){
 // Perform t-SNE
 int TSNE::run(double* X, int N, int D, double* Y, int no_dims, double perplexity, double theta, int rand_seed,
 		bool skip_random_init, int max_iter, int stop_lying_iter, 
-		int mom_switch_iter, int K, double sigma, int nbody_algo, int knn_algo, double early_exag_coeff,double * initialError, double * costs, bool no_momentum_during_exag,
+		int mom_switch_iter, int K, int K_random, double sigma, int nbody_algo, int knn_algo, double early_exag_coeff,double * initialError, double * costs, bool no_momentum_during_exag,
 		int start_late_exag_iter, double late_exag_coeff, int n_trees,int search_k,
 		int nterms, double intervals_per_integer, int min_num_intervals, unsigned int nthreads) {
 
@@ -183,23 +183,27 @@ int TSNE::run(double* X, int N, int D, double* Y, int no_dims, double perplexity
 		double sigma_to_use;
 
 		if (perplexity < 0 ) {
-			printf("Using manually set kernel width\n");
+			printf("Using manually set kernel width.\n");
 			K_to_use = K;
 			sigma_to_use = sigma;
 		} else {
-			printf("Using perplexity, not the manually set kernel width.  K (number of nearest neighbors) and sigma (bandwidth) parameters are going to be ignored.\n");
-			K_to_use = (int) 3 * perplexity;
+			printf("Using perplexity, not the manually set kernel width. Ignoring the value of sigma (bandwidth) parameter.\n");
+			if (K < 0) {
+				K_to_use = (int) 3 * perplexity;  // using 3*perplexity by default
+			} else {
+				K_to_use = K;
+			}
 			sigma_to_use = -1;
 		}
 		
 		if (knn_algo == 1) {
 			printf("Using ANNOY for knn search, with parameters: n_trees %d and search_k %d\n", n_trees, search_k);
 			int error_code = 0;
-			error_code = computeGaussianPerplexity(X, N, D, &row_P, &col_P, &val_P, perplexity, K_to_use, sigma_to_use, n_trees, search_k, nthreads);
+			error_code = computeGaussianPerplexity(X, N, D, &row_P, &col_P, &val_P, perplexity, K_to_use, K_random, sigma_to_use, n_trees, search_k, nthreads);
 			if (error_code <0) return error_code;
 		} else if (knn_algo == 2) {
 			printf("Using VP trees for nearest neighbor search\n");
-			computeGaussianPerplexity(X, N, D, &row_P, &col_P, &val_P, perplexity, K_to_use, sigma_to_use, nthreads);
+			computeGaussianPerplexity(X, N, D, &row_P, &col_P, &val_P, perplexity, K_to_use, K_random, sigma_to_use, nthreads);
 		} else {
 			printf("Invalid knn_algo param\n");
 			free(dY);
@@ -935,7 +939,7 @@ double TSNE::distances2similarities(double *D, double *P, int N, int n, double p
 		// Using fixed kernel width: no iterations needed
 		beta = 1/sigma;
 		for(int m = 0; m < N; m++) P[m] = exp(-beta * (ifSquared ? D[m] : D[m]*D[m]));
-		P[n] = DBL_MIN;
+		if (n>=0) P[n] = DBL_MIN;
 
 		sum_P = DBL_MIN;
 		for(int m = 0; m < N; m++) sum_P += P[m];
@@ -976,7 +980,7 @@ void TSNE::computeGaussianPerplexity(double* X, int N, int D, double* P, double 
 
 // Compute input similarities using ANNOY
 int TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row_P, unsigned int** _col_P, 
-		double** _val_P, double perplexity, int K, double sigma, int num_trees, int search_k, unsigned int nthreads) {
+		double** _val_P, double perplexity, int K, int K_random, double sigma, int num_trees, int search_k, unsigned int nthreads) {
 
 	if( access( "temp/val_P.dat", F_OK ) != -1 ) {
 		printf("val_P exists, loading the file.");
@@ -1021,15 +1025,19 @@ int TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row
 
 		// Allocate the memory we need
 		*_row_P = (unsigned int*)    malloc((N + 1) * sizeof(unsigned int));
-		*_col_P = (unsigned int*)    calloc(N * K, sizeof(unsigned int));
-		printf("Going to allocate N: %d, K: %d, N*K = %d\n", N, K, N*K);
-		*_val_P = (double*) calloc(N * K, sizeof(double));
+		*_col_P = (unsigned int*)    calloc(N * (K+K_random), sizeof(unsigned int));
+		if(K_random==0){
+			printf("Going to allocate N: %d, K: %d, N*K = %d\n", N, K, N*K);
+		} else {
+			printf("Going to allocate N: %d, K: %d, K_random: %d, N*(K+K_random) = %d\n", N, K, K_random, N*(K+K_random));
+		}
+		*_val_P = (double*) calloc(N * (K+K_random), sizeof(double));
 		if(*_row_P == NULL || *_col_P == NULL || *_val_P == NULL) { printf("Memory allocation failed!\n"); exit(1); }
 		unsigned int* row_P = *_row_P;
 		unsigned int* col_P = *_col_P;
 		double* val_P = *_val_P;
 		row_P[0] = 0;
-		for(int n = 0; n < N; n++) row_P[n + 1] = row_P[n] + (unsigned int) K;
+		for(int n = 0; n < N; n++) row_P[n + 1] = row_P[n] + (unsigned int) K + (unsigned int) K_random;
 
 		printf("Building Annoy tree...\n");
 		//Begin annoy
@@ -1094,10 +1102,35 @@ int TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row
 							std::vector<double> closest_distances;
 							tree.get_nns_by_item(n, K+1, search_k, &closest, &closest_distances);
 
+							if(K_random > 0){
+								// Adding K_random random points to the K nearest neighbours
+								std::vector<int> candidates(N);
+								for(int j=0; j<N; j++) {
+									candidates[j] = j;
+								}
+								for(int j=0; j<K; j++) {
+									candidates[closest[j+1]] = -1;
+								}
+								auto rng = std::default_random_engine {};
+								std::shuffle(candidates.begin(), candidates.end(), rng);
+								int added = 0;
+								for(int j=0; j<N; j++) {
+									if (candidates[j] == -1) {
+										continue;
+									}
+									closest.push_back(candidates[j]);
+									closest_distances.push_back(tree.get_distance(n,candidates[j]));
+									added++;
+									if (added == K_random) {
+										break;
+									}
+								}
+							}
+
 							double* cur_P = (double*) malloc((N - 1) * sizeof(double));
 							if(cur_P == NULL) { printf("Memory allocation failed!\n"); exit(1); }
 
-							double beta = distances2similarities(&closest_distances[1], cur_P, K, -1, perplexity, sigma, false);
+							double beta = distances2similarities(&closest_distances[1], cur_P, K+K_random, -1, perplexity, sigma, false);
 							if(n % 10000 == 0) {
 								if (perplexity > 0) {
 									printf(" - point %d of %d, most recent beta calculated is %lf \n", n, N, beta);
@@ -1107,7 +1140,7 @@ int TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row
 							}
 
 							// Store current row of P in matrix
-							for(unsigned int m = 0; m < K; m++) {
+							for(unsigned int m = 0; m < K+K_random; m++) {
 								col_P[row_P[n] + m] = (unsigned int) closest[m + 1];
 								val_P[row_P[n] + m] = cur_P[m];
 							}
@@ -1155,7 +1188,7 @@ int TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row
 	return 0;
 }
 // Compute input similarities with a fixed perplexity using ball trees (this function allocates memory another function should free)
-void TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row_P, unsigned int** _col_P, double** _val_P, double perplexity, int K, double sigma, unsigned int nthreads) {
+void TSNE::computeGaussianPerplexity(double* X, int N, int D, unsigned int** _row_P, unsigned int** _col_P, double** _val_P, double perplexity, int K, int K_random, double sigma, unsigned int nthreads) {
 
 
 	if(perplexity > K) printf("Perplexity should be lower than K!\n");
@@ -1396,7 +1429,7 @@ double TSNE::randn() {
 // Note: this function does a malloc that should be freed elsewhere
 bool TSNE::load_data(const char *data_path, double** data, double** Y, int* n, int* d, int* no_dims, double*
 		theta, double* perplexity, int* rand_seed, int* max_iter, int* stop_lying_iter,
-		int * K, double * sigma, int * nbody_algo, int * knn_algo, double *
+		int * K, int *K_random, double * sigma, int * nbody_algo, int * knn_algo, double *
 		early_exag_coeff, int * no_momentum_during_exag, int * n_trees, int * search_k, int * start_late_exag_iter, double * late_exag_coeff,
 		int * nterms, double * intervals_per_integer, int *min_num_intervals, bool *skip_random_init) {
 
@@ -1415,7 +1448,8 @@ bool TSNE::load_data(const char *data_path, double** data, double** Y, int* n, i
 	result = fread(no_dims, sizeof(int), 1, h);             // output dimensionality
 	result = fread(max_iter, sizeof(int),1,h);              // maximum number of iterations
 	result = fread(stop_lying_iter, sizeof(int),1,h);         
-	result = fread(K, sizeof(int),1,h);                       
+	result = fread(K, sizeof(int),1,h);
+	result = fread(K_random, sizeof(int),1,h);              // when computing K nearest neighbours, add K_random random points from the rest
 	result = fread(sigma, sizeof(double),1,h);                
 	result = fread(nbody_algo, sizeof(int),1,h);              
 	result = fread(knn_algo, sizeof(int),1,h);                
@@ -1452,12 +1486,12 @@ bool TSNE::load_data(const char *data_path, double** data, double** Y, int* n, i
 	fclose(h);
 	printf("Read the following parameters:\n\t n %d by d %d dataset, theta %lf\n"
 			"\t perplexity %lf, no_dims %d, max_iter %d,  stop_lying_iter %d\n"
-			"\t K %d, sigma %lf, nbody_algo %d, knn_algo %d, compexagcoef %lf\n"
+			"\t K %d, K_random %d, sigma %lf, nbody_algo %d, knn_algo %d, compexagcoef %lf\n"
 			"\t no_momentum_during_exag %d, n_trees %d, search_k %d, start_late_exag_iter %d, late_exag_coeff %lf\n"
 			"\t nterms %d, interval_per_integer %lf, min_num_intervals %d\n",  
 			*n, *d, *theta, *perplexity, 
 			*no_dims, *max_iter,*stop_lying_iter, 
-			*K, *sigma, *nbody_algo, *knn_algo, *early_exag_coeff,
+			*K, *K_random, *sigma, *nbody_algo, *knn_algo, *early_exag_coeff,
 			*no_momentum_during_exag, *n_trees, *search_k, *start_late_exag_iter, *late_exag_coeff,
 			*nterms, *intervals_per_integer, *min_num_intervals);
 	printf("Read the %i x %i data matrix successfully!\n", *n, *d);
@@ -1493,7 +1527,8 @@ void TSNE::save_data(const char *result_path, double* data, int* landmarks, doub
 int main(int argc, char *argv[]) {
 
 	// Define some variables
-	int origN, N, D, no_dims, max_iter, stop_lying_iter,  K, nbody_algo, knn_algo, no_momentum_during_exag,n_trees,search_k, start_late_exag_iter;
+	int origN, N, D, no_dims, max_iter, stop_lying_iter,  K, K_random;
+	int nbody_algo, knn_algo, no_momentum_during_exag,n_trees,search_k, start_late_exag_iter;
 	double   sigma, early_exag_coeff, late_exag_coeff;
 	double perplexity, theta, *data, *initial_data;
 	int nterms, min_num_intervals;
@@ -1524,7 +1559,7 @@ int main(int argc, char *argv[]) {
 
 	// Read the parameters and the dataset
 	if(tsne->load_data(data_path, &data, &Y, &origN, &D, &no_dims, &theta, &perplexity,
-				&rand_seed, &max_iter, &stop_lying_iter, &K,
+				&rand_seed, &max_iter, &stop_lying_iter, &K, &K_random,
 				&sigma, &nbody_algo, &knn_algo,
 				&early_exag_coeff, &no_momentum_during_exag,
 				&n_trees, &search_k, &start_late_exag_iter,
@@ -1545,7 +1580,7 @@ int main(int argc, char *argv[]) {
 		double initialError;
 		int error_code = 0;
 		error_code = tsne->run(data, N, D, Y, no_dims, perplexity, theta, rand_seed, skip_random_init, max_iter, 
-				stop_lying_iter,250, K, sigma, nbody_algo, knn_algo, early_exag_coeff, &initialError, 
+				stop_lying_iter, 250, K, K_random, sigma, nbody_algo, knn_algo, early_exag_coeff, &initialError, 
 				costs, no_momentum_during_exag_bool, start_late_exag_iter, late_exag_coeff, n_trees,search_k, 
 				nterms, intervals_per_integer, min_num_intervals, nthreads);
 		if (error_code <0 ) {
